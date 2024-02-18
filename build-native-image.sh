@@ -1,1 +1,1 @@
-mvn -Pnative spring-boot:build-image
+mvn clean package -Pnative spring-boot:build-image

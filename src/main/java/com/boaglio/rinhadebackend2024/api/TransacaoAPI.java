@@ -4,37 +4,40 @@ import com.boaglio.rinhadebackend2024.domain.Cliente;
 import com.boaglio.rinhadebackend2024.domain.Transacao;
 import com.boaglio.rinhadebackend2024.dto.TransacaoRequest;
 import com.boaglio.rinhadebackend2024.dto.TransacaoResponse;
-import com.boaglio.rinhadebackend2024.exception.SemSaldoException;
-import com.boaglio.rinhadebackend2024.repository.TransacaoRepository;
-import com.boaglio.rinhadebackend2024.service.TransacaoService;
+import com.boaglio.rinhadebackend2024.repository.ClienteRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
 
-import java.util.List;
 import java.util.Objects;
 
 @RestController
 public class TransacaoAPI {
 
+    public static final int MAX_SIZE_DESCRICAO = 10;
     private static long contador = 0L;
-    private final TransacaoRepository transacaoRepository;
-    private final TransacaoService transacaoService;
-    private static final ObjectMapper mapper = new ObjectMapper();
 
+    private static  final String CREDITO = "c";
+    private static  final String DEBITO = "d";
+
+    private static final ObjectMapper mapper = new ObjectMapper();
+    private final ClienteRepository clienteRepository;
     Logger log = LoggerFactory.getLogger(TransacaoAPI.class.getSimpleName());
 
-    public TransacaoAPI(TransacaoRepository transacaoRepository, TransacaoService transacaoService) {
-        this.transacaoRepository = transacaoRepository;
-        this.transacaoService = transacaoService;
+    public TransacaoAPI( ClienteRepository clienteRepository) {
+        this.clienteRepository = clienteRepository;
     }
+
 
     @PostMapping("/clientes/{id}/transacoes")
     public ResponseEntity<Object> transacoes(@PathVariable Long id, @RequestBody String  bodyStr ) {
-        // log.info("transacao: "+bodyStr);
+        // validation - pra q Spring Validation, veja q codigo lindo:
         TransacaoRequest body;
         try {
             body = mapper.readValue(bodyStr, TransacaoRequest.class);
@@ -50,46 +53,36 @@ public class TransacaoAPI {
         if (Objects.isNull(body)||
             Cliente.invalidCustomer(id) || // ID cliente
             Objects.isNull(body.tipo()) || body.tipo().isEmpty() ||  !Transacao.validTipoTransacao(body.tipo())  ||  // tipo
-            Objects.isNull(body.descricao())|| body.descricao().isEmpty() ||  body.descricao().length()>10  ||    // descricao
+            Objects.isNull(body.descricao())|| body.descricao().isEmpty() ||  body.descricao().length()> MAX_SIZE_DESCRICAO ||    // descricao
             body.valor() <= 0 // somente valores positivos
          ) {
             log.info(++contador+" Invalid request ! ");
             return ResponseEntity.unprocessableEntity().build();
         }
+        // comeco da transacao
         var valorDaTransacao = body.valor();
-        TransacaoResponse transacaoResponse;
-        if (Transacao.TipoTransacao.c.name().equals(body.tipo())) {
-            // credito
-            transacaoResponse = transacaoService.efetuaCredito(id,valorDaTransacao, body.descricao());
-        } else {
-            // debito
-            try {
-                transacaoResponse = transacaoService.efetuaDebito(id,valorDaTransacao, body.descricao());
-            } catch (SemSaldoException e) {
+        var cliente = clienteRepository.findById(id).get();
+        var saldoAtual = cliente.getSaldo();
+        var limiteDoCliente = cliente.getLimite();
+        if (DEBITO.equals(body.tipo())) {
+            if ((saldoAtual + limiteDoCliente) >= valorDaTransacao) {
+                saldoAtual -= valorDaTransacao;
+                log.info(++contador + " Debito: " + valorDaTransacao + " saldo: " + saldoAtual + " limite: " + limiteDoCliente + " - cliente: " + id);
+            } else {
+                log.info(++contador + " Sem saldo - cliente: " + id);
                 return ResponseEntity.unprocessableEntity().build();
             }
+        } else {
+            // credito
+            saldoAtual+=valorDaTransacao;
+            log.info(++contador + " Credito - cliente: " + valorDaTransacao + " saldo: "+ saldoAtual + " limite: " +limiteDoCliente +  "- cliente: "+id);
         }
-       return ResponseEntity.ok(transacaoResponse);
+        cliente.setTransacoes(cliente.adicionaNovaTransacao(new Transacao(valorDaTransacao, body.tipo(), body.descricao())));
+        cliente.setSaldo(saldoAtual);
+        // salva transacao
+        clienteRepository.save(cliente);
+
+       return ResponseEntity.ok(new TransacaoResponse(cliente.getLimite(), saldoAtual));
     }
 
-    @GetMapping("/transacoes")
-    public Long getTransacoesTotal() {
-        var total = transacaoRepository.count();
-        log.info(++contador + " total de transacoes: " + total);
-        return total;
-    }
-
-    @GetMapping("/transacoes/{id}")
-    public ResponseEntity<Transacao> getTransacoes(@PathVariable String id) {
-        var transacao =  transacaoRepository.findById(id);
-        log.info(++contador + " buscando transacao: "+id);
-        return transacao.map(ResponseEntity::ok).orElseGet(() -> ResponseEntity.notFound().build());
-    }
-
-    @GetMapping("/transacoes/cliente/{id}")
-    public ResponseEntity<List<Transacao>> getTransacoesPorCliente(@PathVariable Long id) {
-        var transacaoList =  transacaoRepository.findFirst10ByClienteIdOrderByRealizadaEmDesc(id);
-        log.info(++contador + " buscando transacao do cliente "+id);
-        return ResponseEntity.ok(transacaoList);
-    }
 }
